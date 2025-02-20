@@ -3,6 +3,14 @@ import pandas as pd
 import requests
 from datetime import datetime
 
+# Helper function to safely format metrics
+def format_metric(value):
+    """Format a value as a float with 2 decimal places if it's numeric."""
+    try:
+        return f"{float(value):.2f}"
+    except (ValueError, TypeError):
+        return "N/A"
+
 # Function to fetch sensor data from Nidopro API
 def get_sensor_data(device_id, api_key, from_date, to_date, limit):
     # Actual API endpoint for fetching sensor data
@@ -154,11 +162,11 @@ def main():
         # Display metrics for the latest data point
         latest_data = df.iloc[-1]
         col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("EC (mS/cm)", f"{latest_data.get('EC', 'N/A'):.2f}")
-        col2.metric("pH", f"{latest_data.get('pH', 'N/A'):.2f}")
-        col3.metric("Water Temp (°C)", f"{latest_data.get('waterTemp', 'N/A'):.2f}")
-        col4.metric("Air Temp (°C)", f"{latest_data.get('airTemp', 'N/A'):.2f}")
-        col5.metric("Air Humidity (%)", f"{latest_data.get('airHum', 'N/A'):.2f}")
+        col1.metric("EC (mS/cm)", format_metric(latest_data.get("EC", "N/A")))
+        col2.metric("pH", format_metric(latest_data.get("pH", "N/A")))
+        col3.metric("Water Temp (°C)", format_metric(latest_data.get("waterTemp", "N/A")))
+        col4.metric("Air Temp (°C)", format_metric(latest_data.get("airTemp", "N/A")))
+        col5.metric("Air Humidity (%)", format_metric(latest_data.get("airHum", "N/A")))
 
         # AI Analysis Section
         st.subheader("AI-Powered Analysis")
@@ -171,7 +179,18 @@ def main():
 
         # Historical Data Visualization
         st.subheader("Historical Data")
-        st.line_chart(df[["EC", "pH", "airTemp", "airHum"]])
+        try:
+            # Ensure only numeric data is plotted
+            numeric_columns = ["EC", "pH", "airTemp", "airHum"]
+            df_numeric = df[numeric_columns].apply(pd.to_numeric, errors="coerce")  # Convert to numeric, coercing errors to NaN
+            df_cleaned = df_numeric.dropna()  # Drop rows with NaN values
+
+            if df_cleaned.empty:
+                st.warning("No valid numeric data available for historical visualization.")
+            else:
+                st.line_chart(df_cleaned)
+        except Exception as e:
+            st.error(f"An error occurred while preparing the historical data: {str(e)}")
 
     # Customized Chat Section
     st.subheader("Agriculture Chat")
