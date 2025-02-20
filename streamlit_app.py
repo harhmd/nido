@@ -229,6 +229,18 @@ def inject_custom_css():
             border-radius: 0.5rem;
             color: #32325d;
         }
+ /* Remove "Made with Streamlit" Footer */
+        footer {
+            visibility: hidden;
+        }
+        footer:after {
+            content: 'Powered By FAMA Negeri Melaka'; /* You can add custom text here if needed */
+            visibility: visible;
+            display: block;
+            position: relative;
+            padding: 5px;
+            top: 2px;
+        }
     </style>
     """
     st.markdown(custom_css, unsafe_allow_html=True)
