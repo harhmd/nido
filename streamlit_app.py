@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 # Helper function to safely format metrics
 def format_metric(value):
@@ -11,30 +13,33 @@ def format_metric(value):
     except (ValueError, TypeError):
         return "N/A"
 
+# Initialize session state for login persistence
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "device_id" not in st.session_state:
+    st.session_state.device_id = ""
+if "nidopro_api_key" not in st.session_state:
+    st.session_state.nidopro_api_key = ""
+if "openrouter_api_key" not in st.session_state:
+    st.session_state.openrouter_api_key = ""
+
 # Function to fetch sensor data from Nidopro API
 def get_sensor_data(device_id, api_key, from_date, to_date, limit):
-    # Actual API endpoint for fetching sensor data
     url = f"https://api.nidopro.com/rest/v1/devices/{device_id}/data"
     headers = {
-        "x-api-key": api_key,  # Use the correct header format
+        "x-api-key": api_key,
         "Content-Type": "application/json"
     }
     params = {
-        "from": from_date.isoformat(),  # ISO 8601 format
-        "to": to_date.isoformat(),      # ISO 8601 format
+        "from": from_date.isoformat(),
+        "to": to_date.isoformat(),
         "limit": limit
     }
 
     try:
         response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
-            return response.json().get("data", [])  # Extract the "data" array
-        elif response.status_code == 400:
-            st.error(f"Bad Request: {response.json().get('errors', [{}])[0].get('detail', 'Unknown error')}")
-        elif response.status_code == 401:
-            st.error(f"Unauthorized: {response.json().get('errors', [{}])[0].get('detail', 'Invalid API Key')}")
-        elif response.status_code == 404:
-            st.error(f"Not Found: {response.json().get('errors', [{}])[0].get('detail', 'Device not found')}")
+            return response.json().get("data", [])
         else:
             st.error(f"Error fetching sensor data: {response.status_code} - {response.text}")
         return []
@@ -42,15 +47,28 @@ def get_sensor_data(device_id, api_key, from_date, to_date, limit):
         st.error(f"An error occurred while fetching sensor data: {str(e)}")
         return []
 
+# Retry logic for API calls
+def requests_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500, 502, 503, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 # Function to analyze data using DeepSeek AI via OpenRouter
 def analyze_data_deepseek(openrouter_api_key, data):
-    # OpenRouter API endpoint
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",  # Use your OpenRouter API key
+        "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json"
     }
-    # Prepare the prompt for the AI model
     prompt = (
         f"Analyze the following environmental data and identify any potential problems:\n"
         f"- EC (Electrical Conductivity): {data.get('EC', 'N/A')} mS/cm\n"
@@ -61,7 +79,7 @@ def analyze_data_deepseek(openrouter_api_key, data):
         f"Provide recommendations or corrective actions if any issues are detected."
     )
     payload = {
-        "model": "deepseek/deepseek-r1-distill-llama-70b:free",  # DeepSeek R1 Distill Llama 70B model
+        "model": "deepseek/deepseek-r1-distill-llama-70b:free",
         "messages": [
             {"role": "system", "content": "You are an expert in environmental monitoring and agriculture."},
             {"role": "user", "content": prompt}
@@ -69,10 +87,11 @@ def analyze_data_deepseek(openrouter_api_key, data):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        session = requests_retry_session()
+        response = session.post(url, headers=headers, json=payload, timeout=30)
         if response.status_code == 200:
             result = response.json()
-            return result["choices"][0]["message"]["content"]  # Extract the AI's response
+            return result["choices"][0]["message"]["content"]
         else:
             st.error(f"Error fetching AI analysis: {response.status_code} - {response.text}")
             return None
@@ -82,13 +101,11 @@ def analyze_data_deepseek(openrouter_api_key, data):
 
 # Function to handle customized chat
 def chat_with_ai(openrouter_api_key, topic, user_message):
-    # OpenRouter API endpoint
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",  # Use your OpenRouter API key
+        "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json"
     }
-    # Define allowed topics and their descriptions
     allowed_topics = {
         "irrigation": "Discuss irrigation techniques, water usage, and scheduling.",
         "soil_health": "Discuss soil nutrients, pH levels, and soil improvement methods.",
@@ -97,18 +114,16 @@ def chat_with_ai(openrouter_api_key, topic, user_message):
         "general_agriculture": "General questions about agriculture and farming practices."
     }
 
-    # Validate the selected topic
     if topic not in allowed_topics:
         return "Invalid topic selected. Please choose a valid topic."
 
-    # Prepare the prompt for the AI model
     prompt = (
         f"You are an expert in agriculture. Focus on the topic: {allowed_topics[topic]}\n"
         f"User question: {user_message}\n"
         f"Provide a concise and accurate response."
     )
     payload = {
-        "model": "deepseek/deepseek-r1-distill-llama-70b:free",  # DeepSeek R1 Distill Llama 70B model
+        "model": "deepseek/deepseek-r1-distill-llama-70b:free",
         "messages": [
             {"role": "system", "content": "You are an expert in agriculture."},
             {"role": "user", "content": prompt}
@@ -116,10 +131,11 @@ def chat_with_ai(openrouter_api_key, topic, user_message):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        session = requests_retry_session()
+        response = session.post(url, headers=headers, json=payload, timeout=30)
         if response.status_code == 200:
             result = response.json()
-            return result["choices"][0]["message"]["content"]  # Extract the AI's response
+            return result["choices"][0]["message"]["content"]
         else:
             st.error(f"Error fetching AI response: {response.status_code} - {response.text}")
             return None
@@ -127,52 +143,197 @@ def chat_with_ai(openrouter_api_key, topic, user_message):
         st.error(f"An error occurred during AI chat: {str(e)}")
         return None
 
+# Inject Custom CSS for Stunning Design
+def inject_custom_css():
+    custom_css = """
+    <style>
+        /* Import Lato Font */
+        @import url('https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap');
+
+        /* General Styling */
+        body {
+            font-family: 'Lato', sans-serif;
+        }
+        .stApp {
+            background-color: #f8f9fa;
+        }
+        .sidebar .css-1d391kg {
+            background: linear-gradient(135deg, #6a11cb, #2575fc);
+            color: white !important;
+        }
+        .sidebar .css-1cpxqw2 {
+            color: white !important;
+        }
+        .card {
+            margin-bottom: 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
+            padding: 1rem;
+            text-align: center;
+        }
+        .metric-card h3 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+            color: #ffffff;
+        }
+        .metric-card p {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #ffffff;
+        }
+
+        /* Card Colors */
+        .ec-card {
+            background: linear-gradient(135deg, #00b4d8, #0077b6);
+        }
+        .ph-card {
+            background: linear-gradient(135deg, #ff9f1c, #f77f00);
+        }
+        .temp-card {
+            background: linear-gradient(135deg, #ef476f, #d90429);
+        }
+        .humidity-card {
+            background: linear-gradient(135deg, #8338ec, #6a0dad);
+        }
+
+        /* Chat Styling */
+        .chat-container {
+            margin-top: 1rem;
+            padding: 1rem;
+            background-color: #ffffff;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
+        }
+        .chat-header {
+            margin-bottom: 1rem;
+            font-size: 1.25rem;
+            font-weight: bold;
+            color: #32325d;
+        }
+        .chat-response {
+            margin-top: 1rem;
+            padding: 1rem;
+            background-color: #f8f9fa;
+            border-radius: 0.5rem;
+            color: #32325d;
+        }
+    </style>
+    """
+    st.markdown(custom_css, unsafe_allow_html=True)
+
 # Streamlit app
 def main():
-    st.title("Environmental Monitoring Dashboard")
+    # Inject Custom CSS
+    inject_custom_css()
 
-    # Input fields for Device ID and API Key
-    st.sidebar.header("Authentication")
-    device_id = st.sidebar.text_input("Device ID", placeholder="Enter your Device ID")
-    nidopro_api_key = st.sidebar.text_input("Nidopro API Key", type="password", placeholder="Enter your Nidopro API Key")
-    openrouter_api_key = st.sidebar.text_input("OpenRouter API Key", type="password", placeholder="Enter your OpenRouter API Key")
+    # Title and Header
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <h1 style="color: #32325d;">Environmental Monitoring Dashboard</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Date range and limit inputs
-    st.sidebar.header("Data Retrieval Options")
+    # Login Section
+    if not st.session_state.logged_in:
+        st.sidebar.markdown("""
+        <div class="card">
+            <div class="card-header">
+                <h3 class="text-center">Login</h3>
+            </div>
+            <div class="card-body">
+        """, unsafe_allow_html=True)
+        device_id = st.sidebar.text_input("Device ID", placeholder="Enter your Device ID")
+        nidopro_api_key = st.sidebar.text_input("Nidopro API Key", type="password", placeholder="Enter your Nidopro API Key")
+        openrouter_api_key = st.sidebar.text_input("OpenRouter API Key", type="password", placeholder="Enter your OpenRouter API Key")
+
+        if st.sidebar.button("Login"):
+            if device_id and nidopro_api_key and openrouter_api_key:
+                st.session_state.logged_in = True
+                st.session_state.device_id = device_id
+                st.session_state.nidopro_api_key = nidopro_api_key
+                st.session_state.openrouter_api_key = openrouter_api_key
+                st.experimental_rerun()
+            else:
+                st.sidebar.warning("Please fill in all fields.")
+        st.sidebar.markdown("</div></div>", unsafe_allow_html=True)
+        return
+
+    # Logout Button
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.device_id = ""
+        st.session_state.nidopro_api_key = ""
+        st.session_state.openrouter_api_key = ""
+        st.experimental_rerun()
+
+    # Sidebar for Inputs
+    st.sidebar.markdown("""
+    <div class="card">
+        <div class="card-header">
+            <h3 class="text-center">Data Retrieval Options</h3>
+        </div>
+        <div class="card-body">
+    """, unsafe_allow_html=True)
     from_date = st.sidebar.date_input("From Date", value=datetime(2023, 1, 1))
     to_date = st.sidebar.date_input("To Date", value=datetime.today())
     limit = st.sidebar.slider("Limit (25-1000)", min_value=25, max_value=1000, value=100)
+    st.sidebar.markdown("</div></div>", unsafe_allow_html=True)
 
-    if not device_id or not nidopro_api_key or not openrouter_api_key:
-        st.warning("Please enter your Device ID, Nidopro API Key, and OpenRouter API Key to proceed.")
-        return
-
-    # Fetch sensor data
-    st.subheader("Sensor Data")
+    # Fetch Sensor Data
+    st.markdown("""
+    <div class="card">
+        <div class="card-header">
+            <h3 class="text-center">Sensor Data</h3>
+        </div>
+        <div class="card-body">
+    """, unsafe_allow_html=True)
     with st.spinner("Fetching sensor data..."):
-        sensor_data = get_sensor_data(device_id, nidopro_api_key, from_date, to_date, limit)
+        sensor_data = get_sensor_data(st.session_state.device_id, st.session_state.nidopro_api_key, from_date, to_date, limit)
 
     if sensor_data:
-        # Convert sensor data into a DataFrame for easier handling
         df = pd.DataFrame(sensor_data)
         if df.empty:
             st.warning("No data available for the specified date range.")
             return
 
-        # Display metrics for the latest data point
         latest_data = df.iloc[-1]
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("EC (mS/cm)", format_metric(latest_data.get("EC", "N/A")))
-        col2.metric("pH", format_metric(latest_data.get("pH", "N/A")))
-        col3.metric("Water Temp (°C)", format_metric(latest_data.get("waterTemp", "N/A")))
-        col4.metric("Air Temp (°C)", format_metric(latest_data.get("airTemp", "N/A")))
-        col5.metric("Air Humidity (%)", format_metric(latest_data.get("airHum", "N/A")))
+
+        # Display Metrics in Beautiful Cards
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"""
+            <div class="card ec-card metric-card">
+                <h3>EC (mS/cm)</h3>
+                                <p>{format_metric(latest_data.get("EC", "N/A"))}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"""
+            <div class="card ph-card metric-card">
+                <h3>pH</h3>
+                <p>{format_metric(latest_data.get("pH", "N/A"))}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with col3:
+            st.markdown(f"""
+            <div class="card temp-card metric-card">
+                <h3>Air Temp (°C)</h3>
+                <p>{format_metric(latest_data.get("airTemp", "N/A"))}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with col4:
+            st.markdown(f"""
+            <div class="card humidity-card metric-card">
+                <h3>Air Humidity (%)</h3>
+                <p>{format_metric(latest_data.get("airHum", "N/A"))}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
         # AI Analysis Section
         st.subheader("AI-Powered Analysis")
-        if st.button("Run Analysis"):
+        if st.button("Run Analysis", key="run_analysis"):
             with st.spinner("Analyzing data with DeepSeek AI..."):
-                analysis = analyze_data_deepseek(openrouter_api_key, latest_data)
+                analysis = analyze_data_deepseek(st.session_state.openrouter_api_key, latest_data)
             if analysis:
                 st.success("Analysis Complete!")
                 st.write(analysis)
@@ -180,10 +341,9 @@ def main():
         # Historical Data Visualization
         st.subheader("Historical Data")
         try:
-            # Ensure only numeric data is plotted
             numeric_columns = ["EC", "pH", "airTemp", "airHum"]
-            df_numeric = df[numeric_columns].apply(pd.to_numeric, errors="coerce")  # Convert to numeric, coercing errors to NaN
-            df_cleaned = df_numeric.dropna()  # Drop rows with NaN values
+            df_numeric = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+            df_cleaned = df_numeric.dropna()
 
             if df_cleaned.empty:
                 st.warning("No valid numeric data available for historical visualization.")
@@ -192,8 +352,16 @@ def main():
         except Exception as e:
             st.error(f"An error occurred while preparing the historical data: {str(e)}")
 
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
     # Customized Chat Section
-    st.subheader("Agriculture Chat")
+    st.markdown("""
+    <div class="card chat-container">
+        <div class="card-header">
+            <h3 class="chat-header">Agriculture Chat</h3>
+        </div>
+        <div class="card-body">
+    """, unsafe_allow_html=True)
     st.write("Ask questions related to agriculture. Choose a topic below:")
 
     # Topic selection
@@ -211,15 +379,21 @@ def main():
 
     # User input for chat
     user_message = st.text_input("Ask your question:", placeholder="Type your question here...")
-    if st.button("Send"):
+    if st.button("Send", key="send_chat"):
         if not user_message.strip():
             st.warning("Please enter a question.")
         else:
             with st.spinner("Generating response..."):
-                response = chat_with_ai(openrouter_api_key, topic_key, user_message)
+                response = chat_with_ai(st.session_state.openrouter_api_key, topic_key, user_message)
             if response:
-                st.success("Response:")
-                st.write(response)
+                st.markdown(f"""
+                <div class="chat-response">
+                    <strong>Response:</strong><br>
+                    {response}
+                </div>
+                """, unsafe_allow_html=True)
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
