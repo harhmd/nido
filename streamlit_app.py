@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 import os
+import plotly.express as px  # For creating interactive line graphs
 
 # Helper function to safely format metrics
 def format_metric(value):
@@ -41,7 +42,8 @@ def get_sensor_data(device_id, api_key, from_date, to_date, limit=None):
         response = requests.get(url, headers=headers, params=params)
         if response.status_code == 200:
             st.session_state.api_requests += 1  # Track API requests
-            return response.json().get("data", [])
+            data = response.json().get("data", [])
+            return data
         else:
             st.error(f"Error fetching sensor data: {response.status_code} - {response.text}")
         return []
@@ -108,48 +110,6 @@ def analyze_data_deepseek(data, language="English"):
             return None
     except Exception as e:
         st.error(f"An error occurred during AI analysis: {str(e)}")
-        return None
-
-# Function to interact with OpenRouter for chat-based responses
-@st.cache_data(ttl=300)  # Cache chat responses for 5 minutes
-def chat_with_ai(topic_key, user_message, language="English"):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    # Adjust prompt based on language
-    if language == "Bahasa Malaysia":
-        prompt = (
-            f"Anda adalah seorang pakar dalam {topic_key.replace('_', ' ')}. "
-            f"Jawab soalan berikut dalam Bahasa Malaysia:\n\n{user_message}"
-        )
-    else:
-        prompt = (
-            f"You are an expert in {topic_key.replace('_', ' ')}. "
-            f"Answer the following question:\n\n{user_message}"
-        )
-
-    payload = {
-        "model": "deepseek/deepseek-r1-distill-llama-70b:free",
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ]
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            st.session_state.api_requests += 1  # Track API requests
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-        else:
-            st.error(f"Error fetching AI response: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"An error occurred during AI chat: {str(e)}")
         return None
 
 # Inject Custom CSS for Stunning Design (Argon Theme)
@@ -227,6 +187,21 @@ def inject_custom_css():
             background-color: #f8f9fa;
             border-radius: 0.5rem;
             color: #32325d;
+        }
+
+        /* Sidebar Footer */
+        .sidebar-footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 250px; /* Adjust based on sidebar width */
+            padding: 10px;
+            background-color: #6a11cb;
+            color: white;
+            text-align: center;
+            font-size: 0.9rem;
+            font-weight: bold;
+            border-top-right-radius: 10px;
         }
     </style>
     """
@@ -319,6 +294,13 @@ def main():
     # Display API Usage Statistics
     st.sidebar.write(f"API Requests Made: {st.session_state.api_requests}")
 
+    # Add Sidebar Footer
+    st.sidebar.markdown("""
+    <div class="sidebar-footer">
+        Powered By FAMA Negeri Melaka
+    </div>
+    """, unsafe_allow_html=True)
+
     # Fetch Sensor Data
     st.markdown("""
     <div class="card">
@@ -334,9 +316,20 @@ def main():
     if sensor_data:
         df = pd.DataFrame(sensor_data)
         if not df.empty:
-            latest_data = df.iloc[-1]
+            # Handle missing or misnamed timestamp fields
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            elif 'time' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['time'])
+            else:
+                st.info("No timestamp field found in the API response. Generating timestamps based on data order.")
+                df['timestamp'] = pd.date_range(start=from_date, periods=len(df), freq='T')  # Generate timestamps
+
+            # Sort data by timestamp for proper visualization
+            df = df.sort_values(by='timestamp')
 
             # Display Metrics in Beautiful Cards
+            latest_data = df.iloc[-1]
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.markdown(f"""
@@ -362,11 +355,50 @@ def main():
             with col4:
                 st.markdown(f"""
                 <div class="card humidity-card metric-card">
-                    
-                <h3>Air Humidity (%)</h3>
-                <p>{format_metric(latest_data.get("airHum", "N/A"))}</p>
+                    <h3>Air Humidity (%)</h3>
+                    <p>{format_metric(latest_data.get("airHum", "N/A"))}</p>
                 </div>
                 """, unsafe_allow_html=True)
+
+            # Line Graph Section
+            st.subheader("Trend Analysis")
+            st.write("Visualize trends over time for key metrics.")
+
+            # Allow users to select metrics for the graph
+            metrics = ["EC", "pH", "airTemp", "airHum"]
+            selected_metrics = st.multiselect("Select Metrics to Plot:", metrics, default=metrics)
+
+            if selected_metrics:
+                # Filter the DataFrame to include only selected metrics
+                filtered_df = df[['timestamp'] + selected_metrics]
+
+                # Melt the DataFrame for Plotly compatibility
+                melted_df = filtered_df.melt(id_vars='timestamp', var_name='Metric', value_name='Value')
+
+                # Create an interactive line graph using Plotly
+                fig = px.line(
+                    melted_df,
+                    x='timestamp',
+                    y='Value',
+                    color='Metric',
+                    title="Sensor Data Trends Over Time",
+                    labels={"timestamp": "Timestamp", "Value": "Value"},
+                    template="plotly_white"
+                )
+
+                # Customize the layout
+                fig.update_layout(
+                    legend_title_text="Metrics",
+                    xaxis_title="Timestamp",
+                    yaxis_title="Value",
+                    hovermode="x unified",
+                    margin=dict(l=20, r=20, t=50, b=20),
+                )
+
+                # Display the graph
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Please select at least one metric to plot.")
 
             # AI Analysis Section
             st.subheader("AI-Powered Analysis")
