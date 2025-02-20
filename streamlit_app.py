@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 # Helper function to safely format metrics
 def format_metric(value):
@@ -24,7 +24,7 @@ if "openrouter_api_key" not in st.session_state:
     st.session_state.openrouter_api_key = ""
 
 # Function to fetch sensor data from Nidopro API
-def get_sensor_data(device_id, api_key, from_date, to_date, limit):
+def get_sensor_data(device_id, api_key, from_date, to_date, limit=None):
     url = f"https://api.nidopro.com/rest/v1/devices/{device_id}/data"
     headers = {
         "x-api-key": api_key,
@@ -33,8 +33,9 @@ def get_sensor_data(device_id, api_key, from_date, to_date, limit):
     params = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
-        "limit": limit
     }
+    if limit is not None:
+        params["limit"] = limit
 
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -63,21 +64,35 @@ def requests_retry_session(retries=3, backoff_factor=0.3, status_forcelist=(500,
     return session
 
 # Function to analyze data using DeepSeek AI via OpenRouter
-def analyze_data_deepseek(openrouter_api_key, data):
+def analyze_data_deepseek(openrouter_api_key, data, language="English"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json"
     }
-    prompt = (
-        f"Analyze the following environmental data and identify any potential problems:\n"
-        f"- EC (Electrical Conductivity): {data.get('EC', 'N/A')} mS/cm\n"
-        f"- pH: {data.get('pH', 'N/A')}\n"
-        f"- Water Temperature: {data.get('waterTemp', 'N/A')} °C\n"
-        f"- Air Temperature: {data.get('airTemp', 'N/A')} °C\n"
-        f"- Air Humidity: {data.get('airHum', 'N/A')} %\n\n"
-        f"Provide recommendations or corrective actions if any issues are detected."
-    )
+
+    # Adjust prompt based on language
+    if language == "Bahasa Malaysia":
+        prompt = (
+            f"Analisis data persekitaran berikut dan kenal pasti sebarang masalah yang mungkin:\n"
+            f"- EC (Kekonduksian Elektrik): {data.get('EC', 'N/A')} mS/cm\n"
+            f"- pH: {data.get('pH', 'N/A')}\n"
+            f"- Suhu Air: {data.get('waterTemp', 'N/A')} °C\n"
+            f"- Suhu Udara: {data.get('airTemp', 'N/A')} °C\n"
+            f"- Kelembapan Udara: {data.get('airHum', 'N/A')} %\n\n"
+            f"Berikan cadangan atau tindakan pembetulan jika terdapat sebarang masalah. Jawab dalam Bahasa Malaysia."
+        )
+    else:
+        prompt = (
+            f"Analyze the following environmental data and identify any potential problems:\n"
+            f"- EC (Electrical Conductivity): {data.get('EC', 'N/A')} mS/cm\n"
+            f"- pH: {data.get('pH', 'N/A')}\n"
+            f"- Water Temperature: {data.get('waterTemp', 'N/A')} °C\n"
+            f"- Air Temperature: {data.get('airTemp', 'N/A')} °C\n"
+            f"- Air Humidity: {data.get('airHum', 'N/A')} %\n\n"
+            f"Provide recommendations or corrective actions if any issues are detected."
+        )
+
     payload = {
         "model": "deepseek/deepseek-r1-distill-llama-70b:free",
         "messages": [
@@ -99,33 +114,30 @@ def analyze_data_deepseek(openrouter_api_key, data):
         st.error(f"An error occurred during AI analysis: {str(e)}")
         return None
 
-# Function to handle customized chat
-def chat_with_ai(openrouter_api_key, topic, user_message):
+# Function to interact with OpenRouter for chat-based responses
+def chat_with_ai(openrouter_api_key, topic_key, user_message, language="English"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json"
     }
-    allowed_topics = {
-        "irrigation": "Discuss irrigation techniques, water usage, and scheduling.",
-        "soil_health": "Discuss soil nutrients, pH levels, and soil improvement methods.",
-        "pest_control": "Discuss pest management strategies and organic solutions.",
-        "crop_management": "Discuss crop rotation, planting schedules, and yield optimization.",
-        "general_agriculture": "General questions about agriculture and farming practices."
-    }
 
-    if topic not in allowed_topics:
-        return "Invalid topic selected. Please choose a valid topic."
+    # Adjust prompt based on language
+    if language == "Bahasa Malaysia":
+        prompt = (
+            f"Anda adalah seorang pakar dalam {topic_key.replace('_', ' ')}. "
+            f"Jawab soalan berikut dalam Bahasa Malaysia:\n\n{user_message}"
+        )
+    else:
+        prompt = (
+            f"You are an expert in {topic_key.replace('_', ' ')}. "
+            f"Answer the following question:\n\n{user_message}"
+        )
 
-    prompt = (
-        f"You are an expert in agriculture. Focus on the topic: {allowed_topics[topic]}\n"
-        f"User question: {user_message}\n"
-        f"Provide a concise and accurate response."
-    )
     payload = {
         "model": "deepseek/deepseek-r1-distill-llama-70b:free",
         "messages": [
-            {"role": "system", "content": "You are an expert in agriculture."},
+            {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt}
         ]
     }
@@ -252,7 +264,7 @@ def main():
                 st.session_state.device_id = device_id
                 st.session_state.nidopro_api_key = nidopro_api_key
                 st.session_state.openrouter_api_key = openrouter_api_key
-                st.experimental_rerun()
+                st.rerun()  # Updated from st.experimental_rerun()
             else:
                 st.sidebar.warning("Please fill in all fields.")
         st.sidebar.markdown("</div></div>", unsafe_allow_html=True)
@@ -260,11 +272,10 @@ def main():
 
     # Logout Button
     if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.device_id = ""
-        st.session_state.nidopro_api_key = ""
-        st.session_state.openrouter_api_key = ""
-        st.experimental_rerun()
+        # Clear all session state variables
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()  # Force rerun to reflect changes
 
     # Sidebar for Inputs
     st.sidebar.markdown("""
@@ -274,10 +285,25 @@ def main():
         </div>
         <div class="card-body">
     """, unsafe_allow_html=True)
-    from_date = st.sidebar.date_input("From Date", value=datetime(2023, 1, 1))
-    to_date = st.sidebar.date_input("To Date", value=datetime.today())
+
+        # Date Selection
+    today = datetime.today().date()
+    date_options = {
+        "Today": today,
+        "Yesterday": today - timedelta(days=1),
+        "Last 7 Days": today - timedelta(days=7),
+        "Last 30 Days": today - timedelta(days=30),
+    }
+    selected_date_option = st.sidebar.selectbox("Select Date Range:", list(date_options.keys()))
+    from_date = date_options[selected_date_option] if selected_date_option != "Today" else today
+    to_date = today
+
+    # Limits Parameter
     limit = st.sidebar.slider("Limit (25-1000)", min_value=25, max_value=1000, value=100)
-    st.sidebar.markdown("</div></div>", unsafe_allow_html=True)
+
+    # Language Selection
+    language_options = ["English", "Bahasa Malaysia"]
+    selected_language = st.sidebar.selectbox("Select Language:", language_options)
 
     # Fetch Sensor Data
     st.markdown("""
@@ -304,7 +330,7 @@ def main():
             st.markdown(f"""
             <div class="card ec-card metric-card">
                 <h3>EC (mS/cm)</h3>
-                                <p>{format_metric(latest_data.get("EC", "N/A"))}</p>
+                <p>{format_metric(latest_data.get("EC", "N/A"))}</p>
             </div>
             """, unsafe_allow_html=True)
         with col2:
@@ -333,10 +359,32 @@ def main():
         st.subheader("AI-Powered Analysis")
         if st.button("Run Analysis", key="run_analysis"):
             with st.spinner("Analyzing data with DeepSeek AI..."):
-                analysis = analyze_data_deepseek(st.session_state.openrouter_api_key, latest_data)
-            if analysis:
-                st.success("Analysis Complete!")
-                st.write(analysis)
+                # Use the same date range and limit as configured in the sidebar
+                analysis_data = get_sensor_data(
+                    st.session_state.device_id,
+                    st.session_state.nidopro_api_key,
+                    from_date,
+                    to_date,
+                    limit
+                )
+
+                if analysis_data:
+                    analysis_df = pd.DataFrame(analysis_data)
+                    if not analysis_df.empty:
+                        # Use the latest data point for analysis
+                        latest_analysis_data = analysis_df.iloc[-1]
+                        analysis_result = analyze_data_deepseek(
+                            st.session_state.openrouter_api_key,
+                            latest_analysis_data,
+                            language=selected_language  # Pass selected language
+                        )
+                        if analysis_result:
+                            st.success("Analysis Complete!")
+                            st.write(analysis_result)
+                    else:
+                        st.warning("No data available for the selected analysis period.")
+                else:
+                    st.error("Failed to fetch data for analysis.")
 
         # Historical Data Visualization
         st.subheader("Historical Data")
@@ -384,7 +432,12 @@ def main():
             st.warning("Please enter a question.")
         else:
             with st.spinner("Generating response..."):
-                response = chat_with_ai(st.session_state.openrouter_api_key, topic_key, user_message)
+                response = chat_with_ai(
+                    st.session_state.openrouter_api_key,
+                    topic_key,
+                    user_message,
+                    language=selected_language  # Pass selected language
+                )
             if response:
                 st.markdown(f"""
                 <div class="chat-response">
