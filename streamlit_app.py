@@ -141,7 +141,7 @@ def main():
     inject_custom_css()
 
     # Title and Header
-    st.markdown("<h1 style='text-align: center; color: #4CAF50;'>FAMA MELAKA IOT-AI PILOT PROJECT</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; color: #4CAF50;'>Environmental Monitoring Dashboard</h1>", unsafe_allow_html=True)
 
     # Check for persistent login via query parameters
     query_params = st.query_params
@@ -224,7 +224,7 @@ def main():
                 df['timestamp'] = pd.to_datetime(df['time'])
             else:
                 st.info("No timestamp field found in the API response. Generating timestamps based on data order.")
-                df['timestamp'] = pd.date_range(start=from_date, periods=len(df), freq='T')  # Generate timestamps
+                df['timestamp'] = pd.date_range(start=from_date, periods=len(df), freq='min')  # Generate timestamps
 
             # Sort data by timestamp for proper visualization
             df = df.sort_values(by='timestamp')
@@ -280,6 +280,17 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("Please select at least one metric to plot.")
+
+            # Export Data to CSV
+            st.subheader("Export Data")
+            st.write("Download the fetched sensor data as a CSV file.")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download CSV 📊",
+                data=csv,
+                file_name=f"sensor_data_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                mime="text/csv"
+            )
 
             # AI Analysis Section
             st.subheader("AI-Powered Analysis")
