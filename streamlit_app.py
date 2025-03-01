@@ -4,6 +4,8 @@ import requests
 from datetime import datetime, timedelta
 import os
 import plotly.express as px
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 # Helper function to safely format metrics
 def format_metric(value):
@@ -24,6 +26,61 @@ if "api_requests" not in st.session_state:
     st.session_state.api_requests = 0
 if "selected_language" not in st.session_state:  # Track selected language
     st.session_state.selected_language = "English"
+if "profile_updated" not in st.session_state:
+    st.session_state.profile_updated = False
+if "device_profiles" not in st.session_state:
+    st.session_state.device_profiles = {}
+
+# Load OpenRouter API Key
+if "OPENROUTER_API_KEY" in st.secrets:
+    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+elif "OPENROUTER_API_KEY" in os.environ:
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+else:
+    st.error("OPENROUTER_API_KEY is missing. Please configure it in secrets.toml or as an environment variable.")
+    st.stop()
+
+# Load OpenWeatherMap API Key
+if "OPENWEATHERMAP_API_KEY" in st.secrets:
+    WEATHER_API_KEY = st.secrets["OPENWEATHERMAP_API_KEY"]
+elif "OPENWEATHERMAP_API_KEY" in os.environ:
+    WEATHER_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
+else:
+    st.error("OpenWeatherMap API key is missing. Please configure it in secrets.toml or as an environment variable.")
+    st.stop()
+
+# Function to initialize Google Sheets API
+def init_google_sheets_api():
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        service = build("sheets", "v4", credentials=creds)
+        return service
+    except Exception as e:
+        st.error(f"Failed to initialize Google Sheets API: {str(e)}")
+        return None
+
+# Function to load device profiles from Google Sheets
+@st.cache_data(ttl=300)  # Cache data for 5 minutes
+def load_profiles_from_sheet(service, sheet_id, range_name):
+    try:
+        sheet = service.spreadsheets()
+        result = sheet.values().get(spreadsheetId=sheet_id, range=range_name).execute()
+        values = result.get("values", [])
+
+        if not values:
+            st.warning("No data found in Google Sheet.")
+            return {}
+
+        headers = values[0]
+        rows = values[1:]
+        profiles = {row[0]: dict(zip(headers, row)) for row in rows if row}
+        return profiles
+    except Exception as e:
+        st.error(f"An error occurred while loading profiles from Google Sheets: {str(e)}")
+        return {}
 
 # Function to fetch sensor data from Nidopro API
 @st.cache_data(ttl=300)  # Cache data for 5 minutes
@@ -53,18 +110,35 @@ def get_sensor_data(device_id, api_key, from_date, to_date, limit=None):
         st.error(f"An error occurred while fetching sensor data: {str(e)}")
         return []
 
-# Load OpenRouter API Key
-if "OPENROUTER_API_KEY" in st.secrets:
-    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
-elif "OPENROUTER_API_KEY" in os.environ:
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-else:
-    st.error("OPENROUTER_API_KEY is missing. Please configure it in secrets.toml or as an environment variable.")
-    st.stop()
-
 # Function to analyze data using DeepSeek AI via OpenRouter
 @st.cache_data(ttl=300)  # Cache analysis results for 5 minutes
-def analyze_data_deepseek(data, language="English"):
+def analyze_data_deepseek(sensor_data, location, language="English"):
+    """
+    Analyze environmental sensor data and weather data using DeepSeek AI.
+
+    Args:
+        sensor_data (dict): Environmental sensor data (e.g., EC, pH, temperature, humidity).
+        location (str): The location for which to fetch weather data.
+        language (str): Language for the analysis ("English" or "Bahasa Malaysia").
+
+    Returns:
+        str: Analysis result from DeepSeek AI.
+    """
+    # Fetch weather data from OpenWeatherMap API
+    weather_data = get_weather_forecast(WEATHER_API_KEY, location)
+
+    if not weather_data:
+        st.warning("Failed to fetch weather data. Analysis will proceed without it.")
+        weather_info = "No weather data available."
+    else:
+        current_temp = weather_data["main"]["temp"]
+        weather_desc = weather_data["weather"][0]["description"]
+        weather_info = (
+            f"- Current Temperature: {current_temp}°C\n"
+            f"- Weather Description: {weather_desc.capitalize()}\n"
+        )
+
+    # Prepare the prompt for DeepSeek AI
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -74,23 +148,27 @@ def analyze_data_deepseek(data, language="English"):
     # Adjust prompt based on language
     if language == "Bahasa Malaysia":
         prompt = (
-            f"Analisis data persekitaran berikut dan kenal pasti sebarang masalah yang mungkin:\n"
-            f"- EC (Kekonduksian Elektrik): {data.get('EC', 'N/A')} mS/cm\n"
-            f"- pH: {data.get('pH', 'N/A')}\n"
-            f"- Suhu Air: {data.get('waterTemp', 'N/A')} °C\n"
-            f"- Suhu Udara: {data.get('airTemp', 'N/A')} °C\n"
-            f"- Kelembapan Udara: {data.get('airHum', 'N/A')} %\n\n"
-            f"Berikan cadangan atau tindakan pembetulan jika terdapat sebarang masalah. Jawab dalam Bahasa Malaysia."
+            f"Analisis data persekitaran dan cuaca berikut untuk mengenal pasti sebarang masalah yang mungkin:\n"
+            f"- EC (Kekonduksian Elektrik): {sensor_data.get('EC', 'N/A')} mS/cm\n"
+            f"- pH: {sensor_data.get('pH', 'N/A')}\n"
+            f"- Suhu Air: {sensor_data.get('waterTemp', 'N/A')} °C\n"
+            f"- Suhu Udara: {sensor_data.get('airTemp', 'N/A')} °C\n"
+            f"- Kelembapan Udara: {sensor_data.get('airHum', 'N/A')} %\n"
+            f"{weather_info}\n"
+            f"Lokasi ladang: {location}\n"
+            f"Berikan cadangan atau tindakan pembaikan berdasarkan data ini. Jawab dalam Bahasa Malaysia."
         )
     else:
         prompt = (
-            f"Analyze the following environmental data and identify any potential problems:\n"
-            f"- EC (Electrical Conductivity): {data.get('EC', 'N/A')} mS/cm\n"
-            f"- pH: {data.get('pH', 'N/A')}\n"
-            f"- Water Temperature: {data.get('waterTemp', 'N/A')} °C\n"
-            f"- Air Temperature: {data.get('airTemp', 'N/A')} °C\n"
-            f"- Air Humidity: {data.get('airHum', 'N/A')} %\n\n"
-            f"Provide recommendations or corrective actions if any issues are detected."
+            f"Analyze the following environmental and weather data to identify any potential problems:\n"
+            f"- EC (Electrical Conductivity): {sensor_data.get('EC', 'N/A')} mS/cm\n"
+            f"- pH: {sensor_data.get('pH', 'N/A')}\n"
+            f"- Water Temperature: {sensor_data.get('waterTemp', 'N/A')} °C\n"
+            f"- Air Temperature: {sensor_data.get('airTemp', 'N/A')} °C\n"
+            f"- Air Humidity: {sensor_data.get('airHum', 'N/A')} %\n"
+            f"{weather_info}\n"
+            f"Farm Location: {location}\n"
+            f"Provide recommendations or corrective actions based on this data."
         )
 
     payload = {
@@ -114,34 +192,33 @@ def analyze_data_deepseek(data, language="English"):
         st.error(f"An error occurred during AI analysis: {str(e)}")
         return None
 
-# Inject Custom CSS for Stunning Design
-def inject_custom_css():
-    custom_css = """
-    <style>
-        .stApp {
-            background-color: #f0f2f6;
-        }
-        h1, h2, h3 {
-            color: #4CAF50;
-        }
-        .metric-card {
-            background-color: #ffffff;
-            padding: 1rem;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            text-align: center;
-        }
-    </style>
+# Function to fetch weather forecast from OpenWeatherMap API
+@st.cache_data(ttl=300)  # Cache weather data for 5 minutes
+def get_weather_forecast(api_key, location):
     """
-    st.markdown(custom_css, unsafe_allow_html=True)
+    Fetch weather forecast data for a given location using the OpenWeatherMap API.
+    """
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={location}&appid={api_key}&units=metric"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            st.session_state.api_requests += 1  # Track API requests
+            weather_data = response.json()
+            return weather_data
+        elif response.status_code == 404:
+            st.error(f"Location '{location}' not found. Please check the spelling and try again.")
+            return None
+        else:
+            st.error(f"Error fetching weather data: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"An error occurred while fetching weather data: {str(e)}")
+        return None
 
-# Streamlit app
+# Streamlit App
 def main():
-    # Inject Custom CSS
-    inject_custom_css()
-
     # Title and Header
-    st.markdown("<h1 style='text-align: center; color: #4CAF50;'>Environmental Monitoring Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("Environmental Monitoring Dashboard", unsafe_allow_html=True)
 
     # Check for persistent login via query parameters
     query_params = st.query_params
@@ -152,7 +229,7 @@ def main():
 
     # Login Section
     if not st.session_state.logged_in:
-        st.sidebar.markdown("<h2>Login</h2>", unsafe_allow_html=True)
+        st.sidebar.markdown("Login", unsafe_allow_html=True)
         device_id = st.sidebar.text_input("Device ID", placeholder="Enter your Device ID")
         nidopro_api_key = st.sidebar.text_input("Nidopro API Key", type="password", placeholder="Enter your Nidopro API Key")
 
@@ -181,7 +258,7 @@ def main():
         st.rerun()  # Force rerun to reflect changes
 
     # Sidebar for Inputs
-    st.sidebar.markdown("<h3>Data Retrieval Options</h3>", unsafe_allow_html=True)
+    st.sidebar.markdown("Data Retrieval Options", unsafe_allow_html=True)
 
     # Date Selection
     today = datetime.today().date()
@@ -191,12 +268,12 @@ def main():
         "Last 7 Days": today - timedelta(days=7),
         "Last 30 Days": today - timedelta(days=30),
     }
-    selected_date_option = st.sidebar.selectbox("Select Date Range:", list(date_options.keys()))
+    selected_date_option = st.sidebar.selectbox("Select Date Range:", list(date_options.keys()), index=2)  # Default to "Last 7 Days"
     from_date = date_options[selected_date_option] if selected_date_option != "Today" else today
     to_date = today
 
     # Limits Parameter
-    limit = st.sidebar.slider("Limit (25-1000)", min_value=25, max_value=1000, value=100)
+    limit = st.sidebar.slider("Limit (25-1000)", min_value=25, max_value=1000, value=1000)  # Default to 1000
 
     # Language Selection
     language_options = ["English", "Bahasa Malaysia"]
@@ -205,41 +282,92 @@ def main():
     # Display API Usage Statistics
     st.sidebar.write(f"API Requests Made: {st.session_state.api_requests}")
 
-    # Add Sidebar Footer
-    st.sidebar.markdown("<p style='text-align: center;'>Powered By FAMA Negeri Melaka</p>", unsafe_allow_html=True)
+    # Profile Update Section
+    with st.sidebar.expander("⚙️ Profile Update"):
+        st.markdown("Update Profile")
+        profile = st.session_state.device_profiles.get(st.session_state.device_id, {})
 
-    # Fetch Sensor Data
-    st.markdown("<h2>Sensor Data</h2>", unsafe_allow_html=True)
+        size_farm = st.text_input("Size of Farm (in acres)", value=profile.get("size_farm", ""))
+        type_of_plant = st.text_input("Type of Plant", value=profile.get("type_of_plant", ""))
+        owner_name = st.text_input("Owner Name", value=profile.get("owner_name", ""))
+        exact_location = st.text_input("Exact Location (City/Country)", value=profile.get("exact_location", ""))
+        telephone_number = st.text_input("Telephone Number", value=profile.get("telephone_number", ""))
+
+        if st.button("Save Profile"):
+            updated_profile = {
+                "DeviceID": st.session_state.device_id,
+                "size_farm": size_farm,
+                "type_of_plant": type_of_plant,
+                "owner_name": owner_name,
+                "exact_location": exact_location,
+                "telephone_number": telephone_number,
+            }
+            st.session_state.device_profiles[st.session_state.device_id] = updated_profile
+            st.session_state.profile_updated = True
+            st.success("Profile Updated Successfully!")
+
+        # Display updated profile once
+        if st.session_state.profile_updated:
+            st.markdown("**Updated Profile:**")
+            st.write(f"- Size of Farm: {size_farm}")
+            st.write(f"- Type of Plant: {type_of_plant}")
+            st.write(f"- Owner Name: {owner_name}")
+            st.write(f"- Exact Location: {exact_location}")
+            st.write(f"- Telephone Number: {telephone_number}")
+            st.session_state.profile_updated = False  # Reset flag after displaying
+
+    # Weather Forecast Section
+    if exact_location:
+        weather_data = get_weather_forecast(WEATHER_API_KEY, exact_location)
+        if weather_data:
+            current_temp = weather_data["main"]["temp"]
+            weather_desc = weather_data["weather"][0]["description"]
+
+            st.markdown("Current Weather", unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"Temperature: {current_temp}°C", unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"Weather: {weather_desc.capitalize()}", unsafe_allow_html=True)
+
+        # Fetch Sensor Data
+    st.markdown("Sensor Data", unsafe_allow_html=True)
 
     with st.spinner("Fetching sensor data... ⏳"):
-        sensor_data = get_sensor_data(st.session_state.device_id, st.session_state.nidopro_api_key, from_date, to_date, limit)
+        sensor_data = get_sensor_data(
+            st.session_state.device_id,
+            st.session_state.nidopro_api_key,
+            from_date,
+            to_date,
+            limit
+        )
 
     if sensor_data:
         df = pd.DataFrame(sensor_data)
         if not df.empty:
             # Handle missing or misnamed timestamp fields
-            if 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-            elif 'time' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['time'])
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+            elif "time" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["time"])
             else:
                 st.info("No timestamp field found in the API response. Generating timestamps based on data order.")
-                df['timestamp'] = pd.date_range(start=from_date, periods=len(df), freq='min')  # Generate timestamps
+                df["timestamp"] = pd.date_range(start=from_date, periods=len(df), freq="min")  # Generate timestamps
 
             # Sort data by timestamp for proper visualization
-            df = df.sort_values(by='timestamp')
+            df = df.sort_values(by="timestamp")
 
             # Display Metrics in Beautiful Cards
             latest_data = df.iloc[-1]
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.markdown(f"<div class='metric-card'>EC (mS/cm)<br>{format_metric(latest_data.get('EC', 'N/A'))}</div>", unsafe_allow_html=True)
+                st.markdown(f"EC (mS/cm): {format_metric(latest_data.get('EC', 'N/A'))}", unsafe_allow_html=True)
             with col2:
-                st.markdown(f"<div class='metric-card'>pH<br>{format_metric(latest_data.get('pH', 'N/A'))}</div>", unsafe_allow_html=True)
+                st.markdown(f"pH: {format_metric(latest_data.get('pH', 'N/A'))}", unsafe_allow_html=True)
             with col3:
-                st.markdown(f"<div class='metric-card'>Air Temp (°C)<br>{format_metric(latest_data.get('airTemp', 'N/A'))}</div>", unsafe_allow_html=True)
+                st.markdown(f"Air Temp (°C): {format_metric(latest_data.get('airTemp', 'N/A'))}", unsafe_allow_html=True)
             with col4:
-                st.markdown(f"<div class='metric-card'>Air Humidity (%)<br>{format_metric(latest_data.get('airHum', 'N/A'))}</div>", unsafe_allow_html=True)
+                st.markdown(f"Air Humidity (%): {format_metric(latest_data.get('airHum', 'N/A'))}", unsafe_allow_html=True)
 
             # Line Graph Section
             st.subheader("Trend Analysis")
@@ -251,17 +379,17 @@ def main():
 
             if selected_metrics:
                 # Filter the DataFrame to include only selected metrics
-                filtered_df = df[['timestamp'] + selected_metrics]
+                filtered_df = df[["timestamp"] + selected_metrics]
 
                 # Melt the DataFrame for Plotly compatibility
-                melted_df = filtered_df.melt(id_vars='timestamp', var_name='Metric', value_name='Value')
+                melted_df = filtered_df.melt(id_vars="timestamp", var_name="Metric", value_name="Value")
 
                 # Create an interactive line graph using Plotly
                 fig = px.line(
                     melted_df,
-                    x='timestamp',
-                    y='Value',
-                    color='Metric',
+                    x="timestamp",
+                    y="Value",
+                    color="Metric",
                     title="Sensor Data Trends Over Time",
                     labels={"timestamp": "Timestamp", "Value": "Value"},
                     template="plotly_white"
@@ -284,7 +412,7 @@ def main():
             # Export Data to CSV
             st.subheader("Export Data")
             st.write("Download the fetched sensor data as a CSV file.")
-            csv = df.to_csv(index=False).encode('utf-8')
+            csv = df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download CSV 📊",
                 data=csv,
@@ -296,44 +424,14 @@ def main():
             st.subheader("AI-Powered Analysis")
             if st.button("Run Analysis", key="run_analysis"):
                 with st.spinner("Analyzing data with DeepSeek AI... 🤖"):
-                    analysis_result = analyze_data_deepseek(latest_data, language=st.session_state.selected_language)
+                    location = profile.get("exact_location", "Unknown Location")
+                    analysis_result = analyze_data_deepseek(latest_data, location, language=st.session_state.selected_language)
                     if analysis_result:
                         st.success("Analysis Complete! ✅")
                         st.write(analysis_result)
 
         else:
             st.warning("No data available for the specified date range. ❌")
-
-    # Customized Chat Section
-    st.markdown("<h2>Agriculture Chat</h2>", unsafe_allow_html=True)
-    st.write("Ask questions related to agriculture. Choose a topic below:")
-
-    # Topic selection
-    allowed_topics = {
-        "irrigation": "Irrigation Techniques",
-        "soil_health": "Soil Health",
-        "pest_control": "Pest Control",
-        "crop_management": "Crop Management",
-        "general_agriculture": "General Agriculture"
-    }
-    topic = st.selectbox("Select a topic:", list(allowed_topics.values()))
-
-    # Map selected topic back to its key
-    topic_key = next(key for key, value in allowed_topics.items() if value == topic)
-
-    # User input for chat
-    user_message = st.text_input("Ask your question:", placeholder="Type your question here...")
-    if st.button("Send", key="send_chat"):
-        if not user_message.strip():
-            st.warning("Please enter a question. ❌")
-        else:
-            with st.spinner("Generating response... 🧠"):
-                response = analyze_data_deepseek({"question": user_message}, language=st.session_state.selected_language)
-                if response:
-                    st.markdown(f"""
-                        **Response:** 📝  
-                        {response}
-                    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
